@@ -23,6 +23,7 @@ import csv
 import datetime
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -36,6 +37,8 @@ HERE = Path(__file__).parent
 JS = (HERE / "extension" / "page.js").read_text()
 CDP_PORT = 9222
 CHROME_PROFILE = Path.home() / ".autofill-chrome"
+# Arch and some distros ship only google-chrome-stable; fall back to Chromium
+CHROME_BINARIES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 TRACKER = HERE / "applications.csv"
 LINKS = HERE / "links.txt"
 DICTIONARY = HERE / "dictionary.json"
@@ -419,7 +422,10 @@ def connect(p):
         return p.chromium.connect_over_cdp(url)
     except Exception:
         pass
-    subprocess.Popen(["google-chrome", f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={CHROME_PROFILE}",
+    chrome = next((shutil.which(b) for b in CHROME_BINARIES if shutil.which(b)), None)
+    if not chrome:
+        sys.exit("Chrome not found: install Google Chrome or Chromium (tried " + ", ".join(CHROME_BINARIES) + ")")
+    subprocess.Popen([chrome, f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={CHROME_PROFILE}",
                       "--no-first-run", "--no-default-browser-check"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     for _ in range(40):
