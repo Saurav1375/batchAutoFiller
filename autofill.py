@@ -527,13 +527,13 @@ def handle(ctx, memory, req):
 
 
 def serve(ctx):
-    """Answer the Chrome extension, which reads and fills the form in whatever tab you are on. Ctrl+C stops."""
+    """Answer the browser extension (Chrome or Firefox), which reads and fills the form in whatever tab you are on. Ctrl+C stops."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
     memory = {}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if not self.headers.get("Origin", "").startswith("chrome-extension://"):
+            if not self.headers.get("Origin", "").startswith(("chrome-extension://", "moz-extension://")):
                 return self.send_error(403)  # only the extension: web pages you visit can't use this
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or "{}")
             print(f"\n{'AI' if req.get('ai') else 'fill'}: {req.get('url')}")

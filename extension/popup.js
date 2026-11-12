@@ -100,4 +100,20 @@ async function run(ai) {
   }
 }
 
-run(false);
+// Chrome grants site access at install; Firefox (Manifest V3) asks for it separately, once.
+// Without it the extension can't read forms inside embedded iframes or reach autofill.py on 127.0.0.1.
+const ACCESS = { origins: ['<all_urls>'] };
+
+async function start() {
+  if (await chrome.permissions.contains(ACCESS)) return run(false);
+  say('Allow access to all sites first.', 'warn');
+  out.replaceChildren(el('div', 'Needed to read forms inside embedded iframes and to reach autofill.py on this computer. ' +
+                                'If this popup closes when Firefox asks, press the button again afterwards.', 'hint'));
+  const b = el('button', 'Allow access');
+  // request() must run straight from the click, with no await before it, or Firefox refuses it
+  b.onclick = () => chrome.permissions.request(ACCESS).then(ok => ok ? run(false) : say('Access not granted.', 'warn'));
+  out.append(b);
+  b.focus();
+}
+
+start();

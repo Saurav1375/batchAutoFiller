@@ -56,6 +56,14 @@ Each press:
 
 It fills only the page you're on: click Next yourself and press again on each step. It never submits. After editing anything in `extension/`, press reload on it in `chrome://extensions`.
 
+**Firefox** (128 or newer), instead of step 2:
+
+1. Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…** and pick `extension/manifest.json`. Firefox removes temporary add-ons when it quits, so repeat this after each restart (or see below).
+2. The first press shows **Allow access**: Firefox doesn't grant site access at install. Allow it once (or toggle it in `about:addons` → Application Autofill → Permissions).
+3. Change the shortcut at `about:addons` → gear icon → **Manage Extension Shortcuts**.
+
+To keep it installed across restarts, sign it for yourself (free, private, not listed on the store): create API keys at https://addons.mozilla.org/developers/addon/api/key/, then run `npx web-ext sign --source-dir extension --channel unlisted --api-key ... --api-secret ...` and open the `.xpi` it writes in Firefox.
+
 ### Send links from your phone (Telegram)
 
 Post job links in a private Telegram group; they land in `links.txt` and are deleted from the group, so whatever is still there has not been fetched yet.
