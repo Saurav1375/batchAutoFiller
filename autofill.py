@@ -14,9 +14,11 @@ Setup (once):
 Run:
   python3 autofill.py                 # every link in links.txt not already submitted/skipped
   python3 autofill.py URL [URL ...]   # just these links
+  python3 autofill.py --serve         # answer the Chrome extension in extension/, which fills the tab you are on
   python3 autofill.py --list-free     # free OpenRouter models available right now
 """
 import argparse
+import base64
 import csv
 import datetime
 import json
@@ -28,14 +30,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import ai
+import telegram_inbox
 
 HERE = Path(__file__).parent
-JS = (HERE / "page.js").read_text()
+JS = (HERE / "extension" / "page.js").read_text()
 CDP_PORT = 9222
 CHROME_PROFILE = Path.home() / ".autofill-chrome"
 TRACKER = HERE / "applications.csv"
+LINKS = HERE / "links.txt"
 DICTIONARY = HERE / "dictionary.json"
 MAX_STEPS = 8          # Next-button clicks per application
+ACTION_TIMEOUT = 5000  # ms per fill/click: a field that can't be filled fails fast instead of hanging 30 s
+SERVE_PORT = 8765      # the extension talks to --serve here
 JOB_TEXT_CHARS = 6000  # job description sent to the model
 OPTION = "[role=option]:visible, [id*='-option-']:visible, [class*=suggestion]:visible, .dropdown-location:visible"
 
@@ -194,7 +200,9 @@ def write_with_ai(todo, ctx):
     return out
 
 
-def decide(fields, ctx):
+def triage(fields, ctx):
+    """Answer what the dictionary, resume and skill rules can, without AI or asking.
+    Returns (plan, writing, asking): writing = free-text questions for the AI, asking = only you can answer these."""
     plan, writing, asking = {}, [], []
     for f in fields:
         if f["value"]:
@@ -221,6 +229,11 @@ def decide(fields, ctx):
             writing.append(f)
         elif f["required"] or norm(f["question"]):
             asking.append(f)  # unlabeled optional fields can't be learned, so they're left alone
+    return plan, writing, asking
+
+
+def decide(fields, ctx):
+    plan, writing, asking = triage(fields, ctx)
     if writing:
         plan.update(write_with_ai(writing, ctx))
     for f in asking:
@@ -353,10 +366,8 @@ def settle(page):
     page.wait_for_timeout(800)
 
 
-def fill_page(page, ctx):
-    """Fill one form page. Returns (fields, problems)."""
-    fields, _ = extract(page)
-    plan = decide(fields, ctx)
+def fill_all(fields, plan):
+    """Fill every field in plan. Returns (filled count, problems)."""
     problems, filled = [], 0
     for f in fields:
         if f["id"] in plan:
@@ -365,8 +376,15 @@ def fill_page(page, ctx):
                 filled += 1
             except Exception as e:
                 problems.append(f"{f['question'][:70]!r}: {str(e).splitlines()[0]}")
-        elif f["required"] and not f["value"]:
-            problems.append(f"{f['question'][:70]!r}: left empty")
+    return filled, problems
+
+
+def fill_page(page, ctx):
+    """Fill one form page. Returns (fields, problems)."""
+    fields, _ = extract(page)
+    plan = decide(fields, ctx)
+    filled, problems = fill_all(fields, plan)
+    problems += [f"{f['question'][:70]!r}: left empty" for f in fields if f["required"] and not f["value"] and f["id"] not in plan]
     print(f"   filled {filled} of {len(fields)} fields")
     return fields, problems
 
@@ -385,7 +403,7 @@ def fill_form(page, ctx):
             break
         before = [f["question"] for f in fields]
         print(f"   clicking '{text}'")
-        button.click()
+        button.click(timeout=30000)  # may load a new page: allow longer than a field fill
         settle(page)
         if [f["question"] for f in extract(page, peek=False)[0]] == before:
             problems.append(f"'{text}' did not advance (site validation?)")
@@ -429,6 +447,14 @@ def track(url, title, status, notes):
         w.writerow([datetime.datetime.now().isoformat(timespec="minutes"), url, title, status, notes])
 
 
+def mark_done(url, status):
+    """Submitted links leave links.txt; skipped ones stay as a # comment. Others are left for the next run."""
+    if status not in ("submitted", "skipped") or not LINKS.exists():
+        return
+    lines = LINKS.read_text().splitlines(keepends=True)  # re-read: the Telegram fetch may have added links meanwhile
+    LINKS.write_text("".join(("# " + l if status == "skipped" else "") if l.strip() == url else l for l in lines))
+
+
 def run_link(browser_ctx, url, ctx):
     page = browser_ctx.new_page()
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -446,7 +472,7 @@ def run_link(browser_ctx, url, ctx):
             button, text = find_button(page, "apply")
             if button:
                 print(f"   clicking '{text}'")
-                button.click()
+                button.click(timeout=30000)
                 settle(page)
                 continue
         if login or not is_form:
@@ -463,6 +489,71 @@ def run_link(browser_ctx, url, ctx):
         if cmd != "r":
             status = {"s": "skipped", "a": "needs-attention"}.get(cmd, "submitted")
             return title, status, "; ".join(problems)
+
+
+def handle(ctx, memory, req):
+    """One press of the extension button. req = the tab's url, title, text and the fields page.js read in it.
+    Returns the values for the extension to fill: dictionary answers right away, or with req["ai"], the AI's
+    free-text answers. memory[url] keeps the questions left for you (whatever you type into them by the next
+    press is saved to dictionary.json) and the AI's answers (filled on the next press if the popup was closed)."""
+    fields, url = req["fields"], req["url"]
+    mem = memory.setdefault(url, {"waiting": set(), "ai": {}})
+    if req.get("ai"):
+        _, writing, _ = triage(fields, ctx)
+        ctx.job = {"url": url, "title": req.get("title", ""), "description": req.get("text", "")[:JOB_TEXT_CHARS]}
+        plan = write_with_ai(writing, ctx) if writing else {}
+        mem["ai"].update({norm(f["question"]): plan[f["id"]] for f in writing if f["id"] in plan and norm(f["question"])})
+        return {"plan": plan, "writing": [f["question"] for f in writing if f["id"] not in plan]}
+    learned = []
+    for f in fields:
+        if f["value"] and norm(f["question"]) in mem["waiting"]:
+            save_answer(ctx, f, f["value"])
+            learned.append(f["question"])
+    plan, writing, asking = triage(fields, ctx)
+    plan.update({f["id"]: mem["ai"][norm(f["question"])] for f in writing if norm(f["question"]) in mem["ai"]})
+    mem["waiting"] = {norm(f["question"]) for f in asking} - {""}
+    out = {"plan": plan, "total": len(fields), "learned": learned,
+           "writing": [f["question"] for f in writing if f["id"] not in plan],
+           "asking": [f["question"] + " *" * (f["required"] and "*" not in f["question"]) for f in asking]}
+    if any(f["kind"] == "file" and f["id"] in plan for f in fields):
+        out["resume"] = {"name": ctx.resume_path.name, "data": base64.b64encode(ctx.resume_path.read_bytes()).decode()}
+    return out
+
+
+def serve(ctx):
+    """Answer the Chrome extension, which reads and fills the form in whatever tab you are on. Ctrl+C stops."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    memory = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if not self.headers.get("Origin", "").startswith("chrome-extension://"):
+                return self.send_error(403)  # only the extension: web pages you visit can't use this
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or "{}")
+            print(f"\n{'AI' if req.get('ai') else 'fill'}: {req.get('url')}")
+            try:
+                out = handle(ctx, memory, req)
+                print(f"   {len(out['plan'])} answers" + "".join(f", {len(out[k])} {k}" for k in ("writing", "asking") if out.get(k)))
+            except Exception as e:
+                out = {"error": str(e).splitlines()[0]}
+                print("   ! " + out["error"])
+            body = json.dumps(out).encode()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass  # popup closed; AI answers are kept and filled on the next press
+
+        def log_message(self, *args):
+            pass
+
+    print("Ready: press the extension button (Alt+Shift+F) on any application tab. Ctrl+C stops.")
+    try:
+        HTTPServer(("127.0.0.1", SERVE_PORT), Handler).serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
 
 
 def redact(text):
@@ -494,11 +585,20 @@ def main():
     ap = argparse.ArgumentParser(description="Fill job application forms; you review and submit.")
     ap.add_argument("urls", nargs="*")
     ap.add_argument("--list-free", action="store_true", help="list free OpenRouter models")
+    ap.add_argument("--serve", action="store_true", help="fill tabs you open yourself, from the Chrome extension")
     args = ap.parse_args()
     if args.list_free:
         return ai.list_free()
+    if args.serve:
+        return serve(load_context())
 
-    links = args.urls or [l.strip() for l in (HERE / "links.txt").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    if not args.urls:
+        try:
+            for u in telegram_inbox.sync():
+                print("telegram:", u)
+        except OSError as e:
+            print("telegram: skipped,", e)
+    links = args.urls or [l.strip() for l in LINKS.read_text().splitlines() if l.strip() and not l.startswith("#")]
     done = tracked()
     links = [l for l in links if l not in done]
     if not links:
@@ -508,6 +608,7 @@ def main():
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser_ctx = connect(p).contexts[0]
+        browser_ctx.set_default_timeout(ACTION_TIMEOUT)
         for i, url in enumerate(links, 1):
             print(f"\n[{i}/{len(links)}] {url}")
             try:
@@ -519,6 +620,7 @@ def main():
                 title, status, notes = "", "error", str(e).splitlines()[0]
                 print("   error:", notes)
             track(url, title, status, notes)
+            mark_done(url, status)
             print(f"   -> {status}")
 
 

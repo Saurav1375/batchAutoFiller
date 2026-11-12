@@ -1,0 +1,6 @@
+[Unit]
+Description=Fetch job links from Telegram into links.txt
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ashish/Desktop/IDEAS4AM/auttofiller/telegram_inbox.py

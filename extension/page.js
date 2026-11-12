@@ -1,7 +1,7 @@
-// Runs inside each page frame (evaluated by autofill.py).
+// Runs inside each page frame: evaluated by autofill.py (batch mode) and injected by the extension.
 // extract() finds every form field, including inside open shadow roots, and tags it with
-// data-af="<frame>-<n>" so Python can find it again. Radio/checkbox options get "<id>.<k>".
-(() => {
+// data-af="<frame>-<n>" so the filler can find it again. Radio/checkbox options get "<id>.<k>".
+(globalThis.__af = (() => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
   const byId = (el, id) => (el.getRootNode().getElementById?.(id)) || document.getElementById(id);
@@ -149,4 +149,4 @@
   }
 
   return { extract, findButton };
-})()
+})())

@@ -35,18 +35,54 @@ Put your resume PDF in this folder. In `dictionary.json`, entries with `"a": nul
 ```bash
 python3 autofill.py                 # every link in links.txt (one URL per line)
 python3 autofill.py URL [URL ...]   # just these links
+python3 autofill.py --serve         # fill tabs you open yourself, from the Chrome extension
 python3 autofill.py --list-free     # free OpenRouter models available right now
 python3 test_autofill.py            # self-check on a local two-step form
+python3 test_telegram_inbox.py      # self-check for the Telegram fetch
 ```
+
+### Fill tabs you open yourself (Chrome extension)
+
+Fills the application in whatever tab you are on, in your everyday Chrome, right where it is.
+
+1. Run `python3 autofill.py --serve` and leave the terminal open. It holds your dictionary, resume and AI key; the extension does the reading and typing.
+2. Once: `chrome://extensions`, turn on **Developer mode**, **Load unpacked**, pick the `extension/` folder. Chrome warns it can "read and change your data on all websites": it needs that to reach forms inside embedded iframes, and it only acts when you press it.
+3. On any application page, click the extension's toolbar button or press **Alt+Shift+F** (change it at `chrome://extensions/shortcuts`).
+
+Each press:
+- fills everything `dictionary.json`, your resume and the skill rules can answer, straight away. Nothing is sent to the AI;
+- lists the written questions the AI could answer, with a **Write with AI** button. The AI is called only when you click it, and only with those questions. If you close the popup while it writes, press again to fill its answers;
+- lists the questions only you can answer. Fill them on the page and press again before clicking Next: your answers are saved to `dictionary.json`.
+
+It fills only the page you're on: click Next yourself and press again on each step. It never submits. After editing anything in `extension/`, press reload on it in `chrome://extensions`.
+
+### Send links from your phone (Telegram)
+
+Post job links in a private Telegram group; they land in `links.txt` and are deleted from the group, so whatever is still there has not been fetched yet.
+
+1. In Telegram, open **@BotFather**, send `/newbot`, pick a name. It replies with the token: put it in `.env` as `TELEGRAM_BOT_TOKEN=`.
+2. Still in BotFather: `/setprivacy`, choose your bot, **Disable** (so the bot sees plain messages in groups).
+3. Create a group, add the bot, and make it **admin** with "Delete messages". Post any message in the group.
+4. `python3 telegram_inbox.py --whoami` prints the group's id (a negative number like `-100…`): put it in `.env` as `TELEGRAM_CHAT_ID=`.
+
+Links are fetched at the start of every `python3 autofill.py`. To also fetch every 10 minutes and right after the laptop boots or wakes:
+
+```bash
+cp systemd/telegram-inbox.* ~/.config/systemd/user/   # edit the path in the .service if the repo lives elsewhere
+systemctl --user daemon-reload && systemctl --user enable --now telegram-inbox.timer
+journalctl --user -u telegram-inbox                    # what it fetched
+```
+
+Telegram keeps unfetched bot messages for 24 hours, so links posted while the laptop is off longer than that are lost. Messages from any other chat are ignored.
 
 For each link, the terminal shows what was filled and anything left empty. Then:
 
 | Key | Meaning |
 |---|---|
-| Enter | you submitted it |
+| Enter | you submitted it: removed from `links.txt` |
 | `r` | fill again (e.g. you moved to the next page yourself) |
 | `a` | needs attention, keep for later |
-| `s` | skip |
+| `s` | skip: stays in `links.txt` as a `# ` comment |
 
 If a page needs login, account creation or a CAPTCHA, it pauses until you finish and press Enter.
 
@@ -55,11 +91,13 @@ If a page needs login, account creation or a CAPTCHA, it pauses until you finish
 | File | Purpose |
 |---|---|
 | `autofill.py` | main script: browser, matching, filling, tracking |
-| `page.js` | field extractor that runs inside the page |
+| `extension/` | Chrome extension: reads and fills the tab you're on, asks `--serve` for the answers |
+| `extension/page.js` | field extractor that runs inside the page (both modes) |
 | `ai.py` | OpenRouter client; tries the models in `config.json` in order |
 | `system_prompt.md` | instructions for the AI's written answers; edit to change tone |
 | `dictionary.example.json` | template for your answers |
 | `links.txt` | job links to process |
+| `telegram_inbox.py` | pulls links posted in your Telegram group into `links.txt` |
 
 `dictionary.json`, `config.json`, `.env`, your resume and `applications.csv` are git-ignored.
 

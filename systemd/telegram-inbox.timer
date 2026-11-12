@@ -1,0 +1,9 @@
+[Unit]
+Description=Fetch Telegram job links every 10 minutes and right after boot or wake
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+
+[Install]
+WantedBy=timers.target
